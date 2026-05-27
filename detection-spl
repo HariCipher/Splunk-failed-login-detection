@@ -1,0 +1,2 @@
+index=* EventCode=4625
+| table _time host Account_Name Source_Network_Address Logon_Type Failure_Reason
