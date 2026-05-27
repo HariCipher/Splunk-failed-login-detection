@@ -1,11 +1,14 @@
-# PowerShell Script Block Logging Detection — Splunk (Event ID 4104)
+# Failed Login Detection — Splunk (Event ID 4625)
+
 ---
 
 ## What this is
 
-A Splunk detection for suspicious PowerShell activity using Windows Script Block Logging (Event ID 4104). The rule catches common attacker patterns encoded commands, download cradles, `Invoke-Expression`, obfuscation keywords  by matching against the script content logged by PowerShell itself.
+A basic failed login detection using Windows Security Event ID 4625 inside Splunk.
 
-Getting this working was less about writing the SPL query and more about figuring out why nothing was showing up in Splunk. Troubleshooting took longer than the actual detection logic.
+The goal was not just to find failed authentication attempts, but to inspect how Windows actually logs failed logons, validate important fields, and turn the query into a usable Splunk alert.
+
+This ended up being more useful as a telemetry validation exercise than just a simple detection rule.
 
 ---
 
@@ -15,8 +18,8 @@ Getting this working was less about writing the SPL query and more about figurin
 |-----------|---------|
 | SIEM | Splunk Enterprise 10.2.3 |
 | OS | Windows VM |
-| Log source | Microsoft-Windows-PowerShell/Operational |
-| Event ID | 4104 |
+| Log source | Windows Security Logs |
+| Event ID | 4625 |
 | Forwarder | Splunk Universal Forwarder |
 
 ---
@@ -24,37 +27,23 @@ Getting this working was less about writing the SPL query and more about figurin
 ## Detection query
 
 ```spl
-index=* EventCode=4104
-| eval script=coalesce(ScriptBlockText, Message)
-| search script="*ScriptBlockLogging*"
-    OR script="*Invoke-Expression*"
-    OR script="*IEX*"
-    OR script="*-enc*"
-    OR script="*DownloadString*"
-    OR script="*bypass*"
-    OR script="*FromBase64String*"
-| eval user=coalesce(User, SubjectUserName, "unknown")
-| table _time, ComputerName, user, script
-| sort - _time
+index=* EventCode=4625
+| table _time host Account_Name Source_Network_Address Logon_Type Failure_Reason
 ```
-
-### Why `coalesce(ScriptBlockText, Message)`
-
-In this environment, `ScriptBlockText` wasn't populated. The script content was inside the `Message` field instead. Using `coalesce` handles both cases without breaking the query when one field is missing.
 
 ---
 
 ## What it detects
 
-Keyword matching inside 4104 events for patterns commonly associated with:
+Windows generates Event ID 4625 whenever an authentication attempt fails.
 
-- encoded execution (`-enc`, `FromBase64String`)
-- download cradles (`DownloadString`)
-- dynamic execution (`Invoke-Expression`, `IEX`)
-- policy bypasses (`bypass`)
-- logging recon (`ScriptBlockLogging`)
+In this lab, failed logins were intentionally triggered using invalid credentials against a fake account to generate telemetry for analysis.
 
-It's keyword-based, so it won't catch everything. See the evasion section below.
+The detection focuses on:
+- failed authentication attempts
+- account enumeration behavior
+- brute force style activity
+- invalid credential usage
 
 ---
 
@@ -62,113 +51,122 @@ It's keyword-based, so it won't catch everything. See the evasion section below.
 
 | Technique | ID |
 |-----------|-----|
-| PowerShell | T1059.001 |
-| Command and Scripting Interpreter | T1059 |
-| Obfuscated Files or Information | T1027 |
+| Brute Force | T1110 |
+| Valid Accounts | T1078 |
 
 ---
 
 ## Test activity
 
-Three payloads were used to generate real telemetry:
+Failed logins were generated using:
 
-**Registry recon**
-```powershell
-Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+```cmd
+runas /user:FakeUser cmd
 ```
 
-**Invoke-Expression**
-```powershell
-Invoke-Expression 'Write-Host test123'
-```
+Incorrect passwords were entered multiple times to create repeated 4625 events.
 
-**Encoded command**
-```powershell
-$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Write-Host pwned'))
-powershell -enc $encoded
-```
-
-All three appeared in Splunk after fixing the issues below.
+The events appeared successfully inside Splunk after querying EventCode 4625.
 
 ---
 
-## Issues hit along the way
+## Important fields observed
 
-**Script Block Logging was off by default.**  
-Had to enable it in Group Policy before any 4104 events appeared.
-
-**Forwarder was sending to port 997 instead of 9997.**  
-No events reached Splunk until this was corrected. Confirmed the fix with `tcpdump` to watch traffic hit the listener.
-
-**`ScriptBlockText` wasn't populated.**  
-The raw content existed in `Message` instead. Updated the query to use `coalesce()` to handle this.
-
-**Index name assumptions failed.**  
-Using `index=*` worked. Named index assumptions didn't.
-
-Some 4104 events also had this in the description field:
-```
-Splunk could not get the description for this event
-```
-The raw data was still there and searchable — this was a display issue, not an ingestion failure.
+| Field | Purpose |
+|------|---------|
+| Account_Name | Username used during login attempt |
+| Source_Network_Address | Source address of authentication |
+| Logon_Type | Type of login attempt |
+| Failure_Reason | Reason authentication failed |
+| host | System generating the event |
 
 ---
 
-## Sigma rule
+## Interesting finding
 
-```yaml
-title: Suspicious PowerShell Script Block Logging Activity
-id: b7f31d40-4104-demo
-status: experimental
-description: Detects suspicious PowerShell Script Block Logging keywords
-author: Harilal
-logsource:
-  product: windows
-  service: powershell
-detection:
-  selection:
-    EventID: 4104
-    Message|contains:
-      - 'Invoke-Expression'
-      - 'IEX'
-      - '-enc'
-      - 'DownloadString'
-      - 'bypass'
-      - 'FromBase64String'
-      - 'ScriptBlockLogging'
-  condition: selection
-level: medium
-tags:
-  - attack.execution
-  - attack.t1059.001
+The source address appeared as:
+
+```text
+::1
 ```
+
+This is the IPv6 localhost loopback address, equivalent to:
+
+```text
+127.0.0.1
+```
+
+This indicated the authentication attempts originated locally from the machine itself rather than from an external source.
+
+This is a good example of why raw event inspection matters before assuming attacker activity.
+
+---
+
+## Alert creation
+
+The query was converted into a Splunk alert:
+
+```text
+Failed Login Threshold Detection
+```
+
+Trigger condition:
+
+```text
+Number of Results > 0
+```
+
+This was mainly done to practice operational detection workflow:
+- query validation
+- alert configuration
+- event visibility
+- SOC-style monitoring logic
+
+---
+
+## Issues encountered
+
+### Field validation
+
+Field names did not perfectly match expected documentation.
+
+Raw event inspection was required to confirm:
+- actual field names
+- source address format
+- authentication details
+- logon type values
+
+---
+
+### Localhost confusion
+
+Initially the source address looked unusual because it appeared as:
+
+```text
+::1
+```
+
+This turned out to be normal localhost IPv6 behavior rather than external attacker traffic.
+
+Without inspecting the raw event carefully, this could easily be misunderstood.
 
 ---
 
 ## False positives
 
-This rule will fire on legitimate admin activity. Common sources:
+Common false positives for Event ID 4625 include:
 
-- Automation scripts using encoded commands
-- Monitoring tooling that calls `Invoke-Expression`
-- Internal maintenance operations
-- Legitimate PowerShell modules that reference `bypass` in strings
+- users mistyping passwords
+- expired credentials
+- service account authentication failures
+- scheduled tasks using outdated credentials
+- automated processes retrying authentication
 
-Tune by excluding known-good `ComputerName` or `user` values, or by adding a whitelist to the query.
-
----
-
-## Evasion
-
-This detection is keyword-based, so attackers can avoid it with:
-
-- String concatenation (`"Inv" + "oke-" + "Expression"`)
-- Heavy obfuscation
-- Alternate execution methods (COM objects, .NET reflection)
-- Disabling PowerShell logging before execution
-- In-memory frameworks that don't hit Script Block Logging at all
-
-A more robust version would combine this with process creation events (4688) and parent-child process analysis.
+Repeated failed logons from the same source become more interesting when combined with:
+- frequency analysis
+- multiple usernames
+- unusual logon types
+- remote source addresses
 
 ---
 
@@ -176,13 +174,26 @@ A more robust version would combine this with process creation events (4688) and
 
 | | |
 |--|--|
-| Raw 4104 event | `screenshots/raw-4104-event.png` |
-| Detection query firing | `screenshots/detection-firing.png` |
+| Query results | `screenshots/4625-query-results.png` |
+| Raw event inspection | `screenshots/4625-raw-event.png` |
+| Alert configuration | `screenshots/4625-saved-alert-config.png` |
 
 ---
 
 ## What I took away from this
 
-The detection query itself took maybe 20 minutes. The rest of the time was spent figuring out why logs weren't showing up — wrong port, logging disabled, wrong field name. That troubleshooting is probably more useful to document than the SPL, because the same kinds of silent failures happen in real environments all the time.
+The SPL itself was simple.
+
+The useful part was learning how Windows authentication telemetry actually behaves:
+- field validation
+- localhost source interpretation
+- failed login structures
+- alert workflow configuration
+
+This project reinforced the importance of inspecting raw telemetry before making assumptions about attacker behavior or field meanings.
 
 ---
+
+## Part of 75Hard Cybersecurity Challenge
+
+Day 3 — Windows failed login telemetry analysis and alert creation.
