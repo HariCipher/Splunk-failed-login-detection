@@ -176,7 +176,7 @@ Repeated failed logons from the same source become more interesting when combine
 |--|--|
 | Query results | `screenshots/4625-query-results.png` |
 | Raw event inspection | `screenshots/4625-raw-event.png` |
-| Alert configuration | `screenshots/4625-saved-alert-config.png` |
+| Alert configuration | `screenshots/4625-saved-alert.png` |
 
 ---
 
