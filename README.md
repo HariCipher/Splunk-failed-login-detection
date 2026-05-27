@@ -194,6 +194,3 @@ This project reinforced the importance of inspecting raw telemetry before making
 
 ---
 
-## Part of 75Hard Cybersecurity Challenge
-
-Day 3 — Windows failed login telemetry analysis and alert creation.
